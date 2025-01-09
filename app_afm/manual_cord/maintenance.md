@@ -1,0 +1,1 @@
+docker exec -i app-afm sh -c "node import_note_menu.js"

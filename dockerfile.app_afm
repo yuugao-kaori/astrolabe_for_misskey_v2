@@ -1,0 +1,23 @@
+# Use an official Node.js image
+FROM node:22-alpine
+
+# 作業ディレクトリを作成
+WORKDIR /usr/src/app_afm
+
+# 依存関係をインストールするためにpackage.jsonとpackage-lock.jsonをコピー
+COPY ./app_afm/package**.json ./
+
+# 依存関係をインストール
+RUN npm install
+
+# アプリケーションコードをコピー
+COPY . .
+
+
+# Expose the internal port
+EXPOSE 5000
+
+# アプリを開発モードで起動
+CMD ["npm", "start"]
+
+

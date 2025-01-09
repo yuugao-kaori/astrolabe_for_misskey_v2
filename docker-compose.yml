@@ -1,0 +1,44 @@
+services:
+
+  app-afm:
+    container_name: app-afm
+    build:
+      context: .
+      dockerfile: dockerfile.app_afm
+    volumes:
+      - ./app_afm:/usr/src/app_afm
+      - ./.env:/usr/src/app_afm/.env
+      - ./penetration:/penetration
+    command: sh -c "npm install && npm run start"
+    restart: unless-stopped
+    ports:
+      - "15001:5000"
+    environment:
+      - NODE_ENV=development
+      - KAFKA_BROKER=kafka:9092
+      - TZ=Asia/Tokyo
+    networks:
+      - afm_default
+
+  db-afm:
+    container_name: ${POSTGRES_NAME}
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_REPLICATION_USER: debezium
+      POSTGRES_REPLICATION_PASSWORD: dbz
+    volumes:
+      - ./postgres/postgres-init/check-and-init.sh:/docker-entrypoint-initdb.d/check-and-init.sh
+      - ./db_data:/var/lib/postgresql/data
+      - ./penetration:/penetration
+    restart: unless-stopped
+    ports:
+      - "15433:5432"
+    networks:
+      - afm_default
+
+    
+networks:
+  afm_default:
