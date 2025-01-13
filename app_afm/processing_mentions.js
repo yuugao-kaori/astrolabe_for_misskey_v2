@@ -17,16 +17,16 @@ async function processMentions(note) {
             await sendReply('あーあー、私は何も聞こえませ～～ん', note.visibility , note.id);
             const info_message = 'pongを返信しました';
             await writeLog('info', 'processMentions', info_message, null, null);
-        } else if (note.text && note.text.toLowerCase().includes('bot_heat')) {
+        } else if (note.text && note.text.toLowerCase().includes('info_bot_heat')) {
             const now_heat = await getMultiKVoperation('protection', 'heat');
             const reply_text = `えっと、私のHeat値を知りたいんですね。たぶん${now_heat}！　${now_heat}だと思います。\n\n（たぶんですよ！）`;
             await sendReply(reply_text, note.visibility, note.id);
             const info_message = 'BotのHeat値を送信しました';
             await writeLog('info', 'processMentions', info_message, null, null);
-        } else if (note.text && note.text.toLowerCase().includes('bot_heat_reset')) {
+        } else if (note.text && note.text.toLowerCase().includes('reset_bot_heat')) {
             await updateMultiKVoperation('protection', '0', 'heat');
-            const reply_text = 'は～い！私のHeat値はしっかりリセットされました！これで呟きたい放題です。\nぐへへ～！！';
-            await sendReply(reply_text, note.visibility, note.id);
+            const bot_heat_reset_text = 'は～い！私のHeat値はしっかりリセットされました！これで呟きたい放題です。\nぐへへ～！！';
+            await sendReply(bot_heat_reset_text, note.visibility, note.id);
             const info_message = 'BotのHeat値をリセットしました';
             await writeLog('info', 'processMentions', info_message, null, null);
         } else if (note.text && note.text.toLowerCase().includes('test')) {

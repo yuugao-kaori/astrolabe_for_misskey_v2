@@ -150,8 +150,9 @@ async function createMisskeyNote(token, {
 async function createNote(text) {
     const currentHeat = await getMultiKVoperation('protection', 'heat');
     const maxHeat = await getMultiKVoperation('settings', 'max_heat');
-    if (maxHeat !== null && currentHeat > maxHeat) {
-        logger.error(`投稿回数が制限(${maxHeat}回)を超えました`);
+    if (Number(maxHeat) !== null && Number(currentHeat) > Number(maxHeat)) {
+        const error_message = `投稿回数が制限(${maxHeat}回)を超えました。\n現在のHeat値は${currentHeat}です`;
+        await writeLog('error', 'createNote', error_message, null, null); 
         return null;
     }
     
@@ -173,9 +174,9 @@ async function sendReply(text, visibility, replyId) {
     const currentHeat = await getMultiKVoperation('protection', 'heat');
     const maxHeat = await getMultiKVoperation('settings', 'max_heat');
     
-    if (maxHeat !== null && currentHeat > maxHeat) {
-        const error_message = `投稿回数が制限(${maxHeat}回)を超えました`;
-        await writeLog('error', 'createNote', error_message, null, null); 
+    if (Number(maxHeat) !== null && Number(currentHeat) > Number(maxHeat)) {
+        const error_message = `投稿回数が制限(${maxHeat}回)を超えました。\n現在のHeat値は${currentHeat}です`;
+        await writeLog('error', 'sendReply', error_message, null, null); 
         return null;
     }
     
@@ -199,9 +200,9 @@ async function sendDM(text) {
     const currentHeat = await getMultiKVoperation('protection', 'heat');
     const maxHeat = await getMultiKVoperation('settings', 'max_heat');
     
-    if (maxHeat !== null && currentHeat > maxHeat) {
-        const error_message = `投稿回数が制限(${maxHeat}回)を超えました`;
-        await writeLog('error', 'createNote', error_message, null, null); 
+    if (Number(maxHeat) !== null && Number(currentHeat) > Number(maxHeat)) {
+        const error_message = `投稿回数が制限(${maxHeat}回)を超えました。\n現在のHeat値は${currentHeat}です`;
+        await writeLog('error', 'sendDM', error_message, null, null); 
         return null;
     }
 

@@ -1,6 +1,7 @@
 import WebSocket from 'ws';
 import { config } from 'dotenv';
 import { processMentions } from '../processing_mentions.js';
+import { processFollow } from '../prosessing_follow.js';
 
 config();
 
@@ -66,4 +67,64 @@ function connectWebSocket_hybrid() {
     return ws;
 }
 
-export { connectWebSocket_hybrid };
+
+
+function connectWebSocket_main() {
+    const wsHost = MISSKEY_URL.replace('https://', '');
+    const wsUrl = `wss://${wsHost}/streaming?i=${MISSKEY_TOKEN}`;
+    
+    const ws = new WebSocket(wsUrl);
+
+    ws.on('open', () => {
+        console.log('WebSocket_main接続が確立されました');
+        
+        const connectMessage = {
+            type: 'connect',
+            body: {
+                channel: 'main',
+                id: 'main',
+                params: {}
+            }
+        };
+        
+        ws.send(JSON.stringify(connectMessage));
+    });
+    ws.on('message', (data) => {
+        try {
+            const message = JSON.parse(data);
+           
+            if (message.type === 'channel') {
+                if (message.body.type === 'followed') {
+                    console.log('フォローイベント:', message.body);
+                    const notice = message.body.body;
+                    handleFollow(notice);
+                }
+            }
+
+        } catch (error) {
+            console.error('メッセージのパース中にエラーが発生:', error);
+        }
+    });
+
+    // follow処理関数を修正
+    function handleFollow(notice) {
+        processFollow(notice);
+
+    }
+
+    ws.on('error', (error) => {
+        console.error('WebSocket_mainエラー:', error);
+    });
+
+    ws.on('close', () => {
+        console.log('WebSocket_main接続が閉じられました');
+        setTimeout(() => {
+            console.log('WebSocket_main再接続を試みます...');
+            connectWebSocket_main();
+        }, 5000);
+    });
+
+    return ws;
+}
+
+export { connectWebSocket_hybrid,connectWebSocket_main };

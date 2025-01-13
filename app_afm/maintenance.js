@@ -1,7 +1,11 @@
 import { config } from 'dotenv';
 import pkg from 'pg';
 const { Client } = pkg;
-
+import { updateMultiKVoperation, getMultiKVoperation } from './db_operation/multi_db_connection.js';
+import { processadjustmentFollow } from `./prosessing_follow.js`;
+import { writeLog } from './db_operation/create_logs.js';
+import { deleteOldLogs } from './db_operation/delete_logs.js';
+import { sendDM } from './misskey_operation/create_note.js';
 config();
 
 // ロガーの設定
@@ -10,56 +14,50 @@ const logger = {
     error: (message) => console.error(`ERROR: ${message}`)
 };
 
-const createDBClient = () => {
-    return new Client({
-        user: process.env.POSTGRES_USER,
-        host: process.env.POSTGRES_HOST,
-        database: process.env.POSTGRES_DB,
-        password: process.env.POSTGRES_PASSWORD,
-        port: process.env.POSTGRES_PORT,
-    });
-};
 
 async function resetHeatCounter() {
-    let client = createDBClient();
-    let connected = false;
-
     try {
-        await client.connect();
-        connected = true;
-
-        await client.query('BEGIN');
-        const updateQuery = 'UPDATE protection SET value = $1 WHERE key = $2 RETURNING value';
-        const result = await client.query(updateQuery, [0, 'heat']);
-        
-        if (result.rowCount === 0) {
-            // レコードが存在しない場合は新規作成
-            const insertQuery = 'INSERT INTO protection (key, value) VALUES ($1, $2)';
-            await client.query(insertQuery, ['heat', 0]);
-        }
-        
-        await client.query('COMMIT');
-        logger.info('heatカウンターを0にリセットしました');
-        return true;
-
-    } catch (error) {
-        await client.query('ROLLBACK').catch(() => {});
-        logger.error(`heatカウンターのリセット中にエラーが発生: ${error.message}`);
-        return false;
-
-    } finally {
-        if (connected) {
-            try {
-                await client.end();
-            } catch (closeError) {
-                logger.error(`DB接続のクローズ中にエラーが発生: ${closeError.message}`);
-            }
-        }
+        await updateMultiKVoperation('protection', '0', 'heat');
+        const info_message = ('heatカウンターを0にリセットしました');
+        await writeLog('info', 'resetHeatCounter', info_message, null, null);
+        await updateMultiKVoperation('protection', '0', 'chat_gpt_heat');
+        const info_message2 = ('chat_gpt_heatカウンターを0にリセットしました');
+        await writeLog('info', 'resetHeatCounter', info_message2, null, null);
     }
+    catch (error) {
+        const error_message = (`heatカウンターのリセット中にエラーが発生: ${error.message}`);
+        await writeLog('error', 'resetHeatCounter', error_message, null, null);
+        return false;
+    }
+
 }
 
+async function executeMaintenance() {
+    try {
+        await resetHeatCounter();
+    } catch (error) {
+        const error_message = `resetHeatCounter実行中にエラーが発生: ${error.message}`;
+        await writeLog('error', 'executeMaintenance', error_message, null, null);
+    }
+    try {
+        await processadjustmentFollow();
+    }
+    catch (error) {
+        const error_message = `processadjustmentFollow実行中にエラーが発生: ${error.message}`;
+        await writeLog('error', 'executeMaintenance', error_message, null, null);
+    }
+    try {
+        await deleteOldLogs();
+    } catch (error) {
+        const error_message = `deleteOldLogs実行中にエラーが発生: ${error.message}`;
+        await writeLog('error', 'executeMaintenance', error_message, null, null);
+    }
+    await sendDM('メンテナンスが完了しました\nメンテナンス内容\n - heat値カウンターのリセット\n - フォロー調整処理\n - 古いログの削除');
+}
+
+
 // メンテナンス関数のエクスポート
-export { resetHeatCounter };
+export { executeMaintenance };
 
 // スクリプトが直接実行された場合のみ実行
 if (import.meta.url === `file://${process.argv[1]}`) {

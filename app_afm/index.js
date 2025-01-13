@@ -5,12 +5,12 @@ import { dirname, join } from 'path';
 import { sendDM, createNote } from './misskey_operation/create_note.js';
 import { getMultiFeed } from './webpage_operation/get_feed.js';
 import { getRandomDinner } from './db_operation/get_dinner.js';
-import { resetHeatCounter } from './maintenance.js';
+import { executeMaintenance } from './maintenance.js';
 import { getRandomDinnerText, getRandomNoteText} from './db_operation/get_note_text.js';
 import { updateMultiMemorandum } from './db_operation/update_memorandum.js';
 import { getMemorandumDinnerText, getMultiMemorandum} from './db_operation/get_memorandum.js';
 import { updateMultiKVoperation, getMultiKVoperation } from './db_operation/multi_db_connection.js';
-import {connectWebSocket_hybrid} from './misskey_operation/connect_websocket.js';
+import {connectWebSocket_hybrid,connectWebSocket_main} from './misskey_operation/connect_websocket.js';
 import { writeLog } from './db_operation/create_logs.js';
 import schedule from 'node-schedule';
 
@@ -57,8 +57,7 @@ async function night_greeting() {
 async function multi_feed(FeedURL) {
 
     const News = await getMultiFeed(FeedURL,1);
-    const feed_text = noteText.feed_text;
-    const news_comment = await getRandomNoteText(feed_text);
+    const news_comment = await getRandomNoteText(`feed_text`);
     // debug用 console.log(News);
     const FeedResult = await getMultiMemorandum(FeedURL);
     if (FeedResult == News[0].link) {
@@ -77,6 +76,7 @@ async function multi_feed(FeedURL) {
     const result = await createNote(message);
 }
 
+
 async function think_Dinner() {
     const dinner = await getRandomDinner();
     if (dinner) {
@@ -87,10 +87,10 @@ async function think_Dinner() {
             await updateMultiMemorandum('dinner', Note_Text);
             return;
         }
-        const Note_Text = await getRandomNoteText(dinner_text);
+        const Note_Text = await getRandomNoteText(`dinner_text`);
         const message = `${Note_Text}\n\n今夜の献立はこちら！\n『${dinner}』`;
         // メモランダムテーブルにNote_Textを保存
-        await updateMultiMemorandum('dinner', Note_Text);
+        await updateMultiMemorandum('dinner', dinner);
         const result = await createNote(message);
         const info_message = '夕食の投稿を実行';
         await writeLog('info', 'think_Dinner', info_message, null, null);
@@ -112,7 +112,9 @@ async function main() {
     try {
         // WebSocket接続
         await connectWebSocket_hybrid();
+        await connectWebSocket_main();
         // 投稿関連のスケジュール
+
         schedule.scheduleJob({scheduleOptions, rule: '0 7 * * *'}, morning_greeting);
         schedule.scheduleJob({scheduleOptions, rule: '30 7 * * *'}, breakfast);
         schedule.scheduleJob({scheduleOptions, rule: '0 10 * * *'}, () => multi_feed('https://trafficnews.jp/feed'));
@@ -126,16 +128,7 @@ async function main() {
         schedule.scheduleJob({scheduleOptions, rule: '20 23 * * *'}, () => test('test'));
 
         // 毎日3時にheatカウンターをリセット
-        schedule.scheduleJob('0 3 * * *', async () => {
-            const result = await resetHeatCounter();
-            if (result) {
-                const info_message = `heatカウンターのリセットに成功しました`;
-                await writeLog('info', 'main', info_message, null, null);
-            } else {
-                const error_message = `heatカウンターのリセットに失敗しました`;
-                await writeLog('error', 'main', error_message, null, null);
-            }
-        });
+        schedule.scheduleJob('0 3 * * *', async () => {const result = await executeMaintenance();});
         //await test()
         // 本番運用ではDMを送信する。sendDM("なんか起動したみたいですよ");
     
