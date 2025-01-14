@@ -12,6 +12,7 @@
       "rss-parser" : "^3.13.0",
       "proper-lockfile": "^4.1.2",
       "express-session": "^1.18.0",
+      "openai"  : "^4.78.0",
       "pg": "^8.13.0",
       "ws": "^8.18.0",
       "cors": "^2.8.5",
