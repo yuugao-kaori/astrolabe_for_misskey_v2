@@ -51,8 +51,8 @@ async function processadjustmentFollow() {
         const difference = followers.filter(x => !followings.some(y => y.id === x.id));
         // console.log(difference);　// 主要生データ（DBに入れるやつ
         const differenceIds = difference.map(user => user.id);
-        // const follower_following_list = (`フォロワーユーザ-フォローユーザ（フォローをするべきユーザ）:${differenceIds}`);
-        // await writeLog('info', 'processadjustmentFollow', follower_following_list, null, null);
+        const follower_following_list = (`フォロワーユーザ-フォローユーザ（フォローをするべきユーザ）:${differenceIds}`);
+        await writeLog('info', 'processadjustmentFollow', follower_following_list, null, null);
         // フォローが必要なユーザー全員に対してフォロー処理を実行
         for (const userId of differenceIds) {
             try {
@@ -70,8 +70,8 @@ async function processadjustmentFollow() {
         // 逆方向の差分計算と表示
         const reverseDifference = followings.filter(x => !followers.some(y => y.id === x.id));
         // console.log(reverseDifference);　// 主要生データ（DBに入れるやつ
-        // const reverseDifferenceIds = reverseDifference.map(user => user.id);
-        // const following_follower_list = (`フォローユーザ-フォロワーユーザ（フォローを外すべきユーザ）:${reverseDifferenceIds}`);
+        const reverseDifferenceIds = reverseDifference.map(user => user.id);
+        const following_follower_list = (`フォローユーザ-フォロワーユーザ（フォローを外すべきユーザ）:${reverseDifferenceIds}`);
         await writeLog('info', 'processadjustmentFollow', following_follower_list, null, null);
         // フォローを外す必要があるユーザー全員に対してフォロー解除処理を実行
         for (const userId of reverseDifferenceIds) {
@@ -95,7 +95,6 @@ async function processadjustmentFollow() {
         throw error;
     }
 }
-
 
 
 export { processFollow, processadjustmentFollow };

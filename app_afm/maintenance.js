@@ -2,10 +2,11 @@ import { config } from 'dotenv';
 import pkg from 'pg';
 const { Client } = pkg;
 import { updateMultiKVoperation, getMultiKVoperation } from './db_operation/multi_db_connection.js';
-import { processadjustmentFollow } from `./prosessing_follow.js`;
+import { processadjustmentFollow } from './prosessing_follow.js';
 import { writeLog } from './db_operation/create_logs.js';
 import { deleteOldLogs } from './db_operation/delete_logs.js';
 import { sendDM } from './misskey_operation/create_note.js';
+import { clearGLTObservation } from './db_operation/clear_table.js';
 config();
 
 // ロガーの設定
@@ -33,26 +34,52 @@ async function resetHeatCounter() {
 }
 
 async function executeMaintenance() {
+    let maintenanceResults = [];
+    let success = '✅';
+    let failure = '❌';
+
+    // heat値カウンターのリセット
     try {
         await resetHeatCounter();
+        maintenanceResults.push(`${success} heat値カウンターのリセット`);
     } catch (error) {
         const error_message = `resetHeatCounter実行中にエラーが発生: ${error.message}`;
         await writeLog('error', 'executeMaintenance', error_message, null, null);
+        maintenanceResults.push(`${failure} heat値カウンターのリセット`);
     }
+
+    // フォロー調整処理
     try {
         await processadjustmentFollow();
-    }
-    catch (error) {
+        maintenanceResults.push(`${success} フォロー調整処理`);
+    } catch (error) {
         const error_message = `processadjustmentFollow実行中にエラーが発生: ${error.message}`;
         await writeLog('error', 'executeMaintenance', error_message, null, null);
+        maintenanceResults.push(`${failure} フォロー調整処理`);
     }
+
+    // 古いログの削除
     try {
         await deleteOldLogs();
+        maintenanceResults.push(`${success} 古いログの削除`);
     } catch (error) {
         const error_message = `deleteOldLogs実行中にエラーが発生: ${error.message}`;
         await writeLog('error', 'executeMaintenance', error_message, null, null);
+        maintenanceResults.push(`${failure} 古いログの削除`);
     }
-    await sendDM('メンテナンスが完了しました\nメンテナンス内容\n - heat値カウンターのリセット\n - フォロー調整処理\n - 古いログの削除');
+
+    // GTL観測テーブルのクリア
+    try {
+        await clearGLTObservation();
+        maintenanceResults.push(`${success} GTL観測テーブルのクリア`);
+    } catch (error) {
+        const error_message = `clearGLTObservation実行中にエラーが発生: ${error.message}`;
+        await writeLog('error', 'executeMaintenance', error_message, null, null);
+        maintenanceResults.push(`${failure} GTL観測テーブルのクリア`);
+    }
+
+    const maintenanceMessage = `メンテナンスが完了しました\nメンテナンス結果:\n${maintenanceResults.join('\n')}`;
+    await sendDM(maintenanceMessage);
 }
 
 

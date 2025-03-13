@@ -20,8 +20,26 @@ services:
     networks:
       - afm_default
 
+  python-afm:
+    container_name: python-afm
+    build:
+      context: .
+      dockerfile: dockerfile.python_afm
+    volumes:
+      - ./python_afm:/usr/src/python_afm
+      - ./.env:/usr/src/python_afm/.env
+      - ./penetration:/penetration
+    command: sh -c "pip install -r requirements.txt && python main.py"
+    restart: unless-stopped
+    ports:
+      - "15002:3000"
+    environment:
+      - TZ=Asia/Tokyo
+    networks:
+      - afm_default
+
   db-afm:
-    container_name: ${POSTGRES_NAME}
+    container_name: ${POSTGRES_HOST}
     image: postgres:16
     environment:
       POSTGRES_USER: ${POSTGRES_USER}

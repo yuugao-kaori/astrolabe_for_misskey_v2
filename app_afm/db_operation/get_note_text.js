@@ -70,7 +70,8 @@ async function getRandomNoteText(key) {
 
         const dinnerTexts = result.rows[0].value;
         const randomIndex = Math.floor(Math.random() * dinnerTexts.length);
-        return dinnerTexts[randomIndex];
+        // データベースから取得したテキストの\nを実際の改行に変換
+        return dinnerTexts[randomIndex].replace(/\\n/g, '\n');
 
     } catch (error) {
         const error_message = `${key}取得中にエラーが発生: ${error.message}`;
