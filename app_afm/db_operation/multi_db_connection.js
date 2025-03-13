@@ -16,7 +16,7 @@ const createDBClient = () => {
 };
 
 // テーブル名のホワイトリストを追加
-const ALLOWED_TABLES = ['protection', 'settings', 'memorandum'];
+const ALLOWED_TABLES = ['protection', 'settings', 'memorandum', 'glt_observation', 'note_text'];
 
 async function updateMultiKVoperation(table, value, key) {
     if (!ALLOWED_TABLES.includes(table)) {
@@ -100,6 +100,7 @@ async function getMultiKVoperation(table, key) {
         }
     }
 }
+
 
 export {
     updateMultiKVoperation,

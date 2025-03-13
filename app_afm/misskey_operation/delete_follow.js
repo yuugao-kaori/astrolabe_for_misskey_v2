@@ -25,34 +25,57 @@ async function deleteMisskeyFollow(userId) {
         userId,
     };
     
-    try {
-        
-
-        const response = await axios.post(url, payload, { headers });
-        console.debug(`Misskey APIリクエスト成功: ${response.status}]\nフォロー解除対象ID: ${userId}`);
+    // 最大リトライ回数
+    const maxRetries = 10;
+    // リトライ間隔（ミリ秒）
+    const retryDelay = 30000; // 30秒
+    let retryCount = 0;
+    
+    while (true) {
+        try {
+            const response = await axios.post(url, payload, { headers });
+            console.debug(`Misskey APIリクエスト成功: ${response.status}]\nフォロー解除対象ID: ${userId}`);
+                    
+            return response.data;
+        } catch (error) {
+            const statusCode = error.response?.status || 'N/A';
+            const error_message = `Misskey APIリクエストでエラーが発生: ${error.message}\nステータスコード: ${statusCode}`;
+            await writeLog('error', 'deleteMisskeyFollow', error_message, null, null);
+            
+            // 500エラーの場合でリトライ回数が上限に達していない場合はリトライ
+            if (statusCode === 500 && retryCount < maxRetries) {
+                retryCount++;
+                await writeLog('warning', 'deleteMisskeyFollow', `500エラーが発生しました。${retryCount}回目のリトライを${retryDelay}ミリ秒後に行います。`, null, null);
                 
-        return response.data;
-    } catch (error) {
-        const error_message = `Misskey APIリクエストでエラーが発生: ${error.message}\nステータスコード: ${error.response?.status || 'N/A'}`;
-        await writeLog('error', 'deleteMisskeyFollow', error_message, null, null);
-        // エラーレスポンスのJSONをより詳細に解析
-        if (error.response?.data) {
-            if (typeof error.response.data === 'object') {
-                const error_message = `エラー詳細:${JSON.stringify(error.response.data, null, 2)}`;
-                await writeLog('error', 'deleteMisskeyFollow', error_message, null, null);
-            } else {
-                const error_message = `レスポンス: ${error.response.data}`;
+                // 指定時間待機
+                await new Promise(resolve => setTimeout(resolve, retryDelay));
+                continue; // ループの先頭に戻り、再試行
+            }
+            
+            // エラーレスポンスのJSONをより詳細に解析
+            if (error.response?.data) {
+                if (typeof error.response.data === 'object') {
+                    const error_message = `エラー詳細:${JSON.stringify(error.response.data, null, 2)}`;
+                    await writeLog('error', 'deleteMisskeyFollow', error_message, null, null);
+                } else {
+                    const error_message = `レスポンス: ${error.response.data}`;
+                    await writeLog('error', 'deleteMisskeyFollow', error_message, null, null);
+                }
+            }
+
+            // エラーの種類に応じた追加情報
+            if (error.code === 'ECONNREFUSED') {
+                const error_message = `Misskeyサーバー(${MISSKEY_URL})に接続できません`;
                 await writeLog('error', 'deleteMisskeyFollow', error_message, null, null);
             }
+            
+            // すべてのリトライに失敗した場合や500以外のエラーの場合
+            if (statusCode === 500 && retryCount >= maxRetries) {
+                await writeLog('error', 'deleteMisskeyFollow', `500エラーでの最大リトライ回数(${maxRetries}回)に達しました。`, null, null);
+            }
+            
+            return null;
         }
-
-        // エラーの種類に応じた追加情報
-        if (error.code === 'ECONNREFUSED') {
-            const error_message = `Misskeyサーバー(${MISSKEY_URL})に接続できません`;
-            await writeLog('error', 'deleteMisskeyFollow', error_message, null, null);
-        }
-        
-        return null;
     }
 }
 
@@ -60,22 +83,3 @@ async function deleteMisskeyFollow(userId) {
 export {
     deleteMisskeyFollow,
 };
-
-const test_delete_id = `9gw9h2omwq`;
-
-async function testDeleteFollow() {
-    console.log(`フォロー解除テストを開始: ユーザーID ${test_delete_id}`);
-    try {
-        const result = await deleteMisskeyFollow(test_delete_id);
-        if (result) {
-            console.log('フォロー解除が成功しました');
-        } else {
-            console.log('フォロー解除に失敗しました');
-        }
-    } catch (error) {
-        console.error('テスト実行中にエラーが発生:', error);
-    }
-}
-
-// テスト実行
-testDeleteFollow();

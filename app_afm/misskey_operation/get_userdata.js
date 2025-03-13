@@ -98,7 +98,32 @@ async function getAllFollowings(userId, batchSize = 100) {
                 ...(lastId && { untilId: lastId })
             };
 
-            const response = await axios.post(url, payload, { headers });
+            let retryCount = 0;
+            const maxRetries = 10;
+            const retryDelay = 30000; // 30秒
+            let response;
+            
+            while (true) {
+                try {
+                    response = await axios.post(url, payload, { headers });
+                    break; // 成功したらループを抜ける
+                } catch (requestError) {
+                    // 500エラーの場合、かつ最大再試行回数に達していない場合
+                    if (requestError.response && requestError.response.status === 500 && retryCount < maxRetries) {
+                        retryCount++;
+                        const retryMessage = `フォローユーザ取得中に500エラーが発生しました。${retryCount}回目の再試行を${retryDelay/1000}秒後に行います。`;
+                        await writeLog('warn', 'getAllFollowings', retryMessage, null, null);
+                        console.log(retryMessage);
+                        
+                        // 指定時間待機
+                        await new Promise(resolve => setTimeout(resolve, retryDelay));
+                        continue;
+                    }
+                    // 500エラー以外またはリトライ回数超過の場合はエラーを投げる
+                    throw requestError;
+                }
+            }
+
             // console.log(response.data);
             // console.log(`フォロワーのID: ${response.data.id}`);
             const followers = response.data;

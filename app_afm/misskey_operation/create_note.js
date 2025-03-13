@@ -78,74 +78,136 @@ async function createMisskeyNote(token, {
     replyId = null,
     renoteId = null,
 } = {}) {
-    const url = "https://misskey.seitendan.com/api/notes/create";
+    const url = `${MISSKEY_URL}/api/notes/create`;
     
     const headers = {
         "Authorization": `Bearer ${token}`,
         "Content-Type": "application/json"
     };
-    
-    const payload = {
-        visibility,
-        visibleUserIds: visibleUserIds || [],
-        cw,
-        localOnly,
-        reactionAcceptance: null,
-        noExtractMentions: false,
-        noExtractHashtags: false,
-        noExtractEmojis: false,
-        channelId: null,
-        text,
-    };
-    
-    if (fileIds?.length) payload.fileIds = fileIds;
-    if (mediaIds?.length) payload.mediaIds = mediaIds;
-    if (poll) payload.poll = poll;
-    if (replyId) payload.replyId = replyId;
-    if (renoteId) payload.renoteId = renoteId;
-    try {
-        
 
-        const response = await axios.post(url, payload, { headers });
-        console.debug(`Misskey APIリクエスト成功: ${response.status}`);
+    // 禁止ワードの取得と置換処理
+    try {
+        const forbiddenWords = await getMultiKVoperation('note_text', 'forbidden');
+        let processedText = text;
         
-        // heat値の更新処理を修正
-        const now_heat = await getMultiKVoperation('protection', 'heat');
-        if (now_heat !== null) {
-            await updateMultiKVoperation('protection', Number(now_heat) + 1, 'heat');
-            const info_message = `heat値を${now_heat}から${Number(now_heat) + 1}に更新しました`;
-            await writeLog('info', 'createMisskeyNote', info_message, null, null);
-        } else {
-            const error_message = 'heat値の取得に失敗しました';
-            await writeLog('error', 'createMisskeyNote', error_message, null, null);
+        if (forbiddenWords && Array.isArray(forbiddenWords)) {
+            forbiddenWords.forEach(word => {
+                const stars = '＊'.repeat(word.length);
+                const regex = new RegExp(word, 'g');
+                if (regex.test(processedText)) {
+                    const info_message = `禁止ワード「${word}」を検出し、置換しました`;
+                    writeLog('info', 'createMisskeyNote', info_message, null, null);
+                }
+                processedText = processedText.replace(regex, stars);
+            });
         }
+
+        const payload = {
+            visibility,
+            visibleUserIds: visibleUserIds || [],
+            cw,
+            localOnly,
+            reactionAcceptance: null,
+            noExtractMentions: false,
+            noExtractHashtags: false,
+            noExtractEmojis: false,
+            channelId: null,
+            text: processedText,
+        };
+
+        if (fileIds?.length) payload.fileIds = fileIds;
+        if (mediaIds?.length) payload.mediaIds = mediaIds;
+        if (poll) payload.poll = poll;
+        if (replyId) payload.replyId = replyId;
+        if (renoteId) payload.renoteId = renoteId;
+
+        // 最大再試行回数
+        const maxRetries = 10;
+        let retries = 0;
         
-        return response.data;
-    } catch (error) {
-        const error_message = `Misskey APIリクエストでエラーが発生: ${error.message}\nステータスコード: ${error.response?.status || 'N/A'}`;
-        await writeLog('error', 'createMisskeyNote', error_message, null, null);
-        // エラーレスポンスのJSONをより詳細に解析
-        if (error.response?.data) {
-            if (typeof error.response.data === 'object') {
-                const error_message = `エラー詳細:${JSON.stringify(error.response.data, null, 2)}`;
+        while (true) {
+            try {
+                const response = await axios.post(url, payload, { headers });
+                console.debug(`Misskey APIリクエスト成功: ${response.status}`);
+                
+                // heat値の更新処理を修正
+                const now_heat = await getMultiKVoperation('protection', 'heat');
+                if (now_heat !== null) {
+                    await updateMultiKVoperation('protection', Number(now_heat) + 1, 'heat');
+                    const info_message = `heat値を${now_heat}から${Number(now_heat) + 1}に更新しました`;
+                    await writeLog('info', 'createMisskeyNote', info_message, null, null);
+                } else {
+                    const error_message = 'heat値の取得に失敗しました';
+                    await writeLog('error', 'createMisskeyNote', error_message, null, null);
+                }
+                
+                return response.data;
+                
+            } catch (error) {
+                // 500エラーの場合で、最大再試行回数に達していない場合は再試行
+                if (error.response?.status === 500 && retries < maxRetries) {
+                    retries++;
+                    const retry_message = `500エラーが発生しました。30秒後に再試行します (${retries}/${maxRetries})`;
+                    await writeLog('warning', 'createMisskeyNote', retry_message, null, null);
+                    console.warn(retry_message);
+                    
+                    // 30秒待機
+                    await new Promise(resolve => setTimeout(resolve, 30000));
+                    continue;
+                }
+                
+                const error_message = `Misskey APIリクエストでエラーが発生: ${error.message}\nステータスコード: ${error.response?.status || 'N/A'}`;
                 await writeLog('error', 'createMisskeyNote', error_message, null, null);
-            } else {
-                const error_message = `レスポンス: ${error.response.data}`;
-                await writeLog('error', 'createMisskeyNote', error_message, null, null);
+                // エラーレスポンスのJSONをより詳細に解析
+                if (error.response?.data) {
+                    if (typeof error.response.data === 'object') {
+                        const error_message = `エラー詳細:${JSON.stringify(error.response.data, null, 2)}`;
+                        await writeLog('error', 'createMisskeyNote', error_message, null, null);
+                    } else {
+                        const error_message = `レスポンス: ${error.response.data}`;
+                        await writeLog('error', 'createMisskeyNote', error_message, null, null);
+                    }
+                }
+
+                // エラーの種類に応じた追加情報
+                if (error.code === 'ECONNREFUSED') {
+                    const error_message = `Misskeyサーバー(${MISSKEY_URL})に接続できません`;
+                    await writeLog('error', 'createMisskeyNote', error_message, null, null);
+                }
+                
+                return null;
             }
         }
-
-        // エラーの種類に応じた追加情報
-        if (error.code === 'ECONNREFUSED') {
-            const error_message = `Misskeyサーバー(${MISSKEY_URL})に接続できません`;
-            await writeLog('error', 'createMisskeyNote', error_message, null, null);
-        }
-        
+    } catch (error) {
+        const error_message = `Misskey APIリクエスト前処理でエラーが発生: ${error.message}`;
+        await writeLog('error', 'createMisskeyNote', error_message, null, null);
         return null;
     }
 }
 
-
+async function createNoteWithMedia(text, mediaIds) {
+    const currentHeat = await getMultiKVoperation('protection', 'heat');
+    const maxHeat = await getMultiKVoperation('settings', 'max_heat');
+    if (Number(maxHeat) !== null && Number(currentHeat) > Number(maxHeat)) {
+        const error_message = `投稿回数が制限(${maxHeat}回)を超えました。\n現在のHeat値は${currentHeat}です`;
+        await writeLog('error', 'createNote', error_message, null, null); 
+        return null;
+    }
+    
+    const result = await createMisskeyNote(MISSKEY_TOKEN, {
+        text,
+        mediaIds
+    });
+    
+    if (result) {
+        const info_message = '投稿に成功しました';
+        await writeLog('info', 'createNoteWithMedia', info_message, null, null);
+    } else {
+        const error_message = '投稿に失敗しました';
+        await writeLog('error', 'createNoteWithMedia', error_message, null, null);
+    }
+    return result;
+}
 
 async function createNote(text) {
     const currentHeat = await getMultiKVoperation('protection', 'heat');
@@ -235,5 +297,6 @@ export {
     createMisskeyNote,
     sendDM,
     sendReply,
-    createNote
+    createNote,
+    createNoteWithMedia
 };

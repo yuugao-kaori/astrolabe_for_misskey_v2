@@ -1,0 +1,25 @@
+FROM python:3.13-slim
+
+# 作業ディレクトリの設定
+WORKDIR /usr/src/python_afm
+
+# タイムゾーンの設定
+ENV TZ=Asia/Tokyo
+RUN ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone
+
+# システムの依存関係をインストール
+RUN apt-get update && apt-get install -y \
+    gcc \
+    python3-dev \
+    unzip \
+    && apt-get clean \
+    && rm -rf /var/lib/apt/lists/*
+
+# requirements.txtをコピー
+COPY ./python_afm/requirements.txt .
+
+# Pythonパッケージをインストール
+RUN pip install --no-cache-dir -r requirements.txt
+
+# アプリケーションのソースコードをコピー
+COPY ./python_afm .

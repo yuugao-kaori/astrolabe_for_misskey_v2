@@ -2,11 +2,18 @@ import WebSocket from 'ws';
 import { config } from 'dotenv';
 import { processMentions } from '../processing_mentions.js';
 import { processFollow } from '../prosessing_follow.js';
+import { processGtlNote } from '../misskey_operation/processing_gtl_note.js';
+import { writeLog } from '../db_operation/create_logs.js';
 
 config();
 
 const MISSKEY_TOKEN = process.env.NOTICE_MISSKEY_TOKEN;
 const MISSKEY_URL = process.env.NOTICE_MISSKEY_URL;
+
+// 再試行回数を追跡する変数を追加
+let retryCount_hybrid = 0;
+let retryCount_global = 0;
+let retryCount_main = 0;
 
 function connectWebSocket_hybrid() {
     const wsHost = MISSKEY_URL.replace('https://', '');
@@ -14,8 +21,9 @@ function connectWebSocket_hybrid() {
     
     const ws = new WebSocket(wsUrl);
 
-    ws.on('open', () => {
-        console.log('WebSocket接続が確立されました');
+    ws.on('open', async () => {
+        retryCount_hybrid = 0; // 接続成功時にリセット
+        await writeLog('info', 'connectWebSocket_hybrid', 'WebSocket接続が確立されました', null, null);
         
         const connectMessage = {
             type: 'connect',
@@ -40,7 +48,7 @@ function connectWebSocket_hybrid() {
             }
 
         } catch (error) {
-            console.error('メッセージのパース中にエラーが発生:', error);
+            writeLog('error', 'connectWebSocket_hybrid', `メッセージのパース中にエラーが発生: ${error}`, null, null);
         }
     });
 
@@ -52,16 +60,84 @@ function connectWebSocket_hybrid() {
         }
     }
 
-    ws.on('error', (error) => {
-        console.error('WebSocketエラー:', error);
+    ws.on('error', async (error) => {
+        await writeLog('error', 'connectWebSocket_hybrid', `WebSocketエラー: ${error}`, null, null);
     });
 
-    ws.on('close', () => {
-        console.log('WebSocket接続が閉じられました');
+    ws.on('close', async () => {
+        const retryDelay = retryCount_hybrid >= 12 ? 3600000 : 5000; // 12回以上は1時間待機
+        await writeLog('info', 'connectWebSocket_hybrid', 
+            `WebSocket接続が閉じられました。${retryDelay/1000}秒後に再接続を試みます。(試行回数: ${retryCount_hybrid + 1})`, 
+            null, null);
+        
         setTimeout(() => {
             console.log('WebSocket再接続を試みます...');
+            retryCount_hybrid++;
             connectWebSocket_hybrid();
-        }, 5000);
+        }, retryDelay);
+    });
+
+    return ws;
+}
+
+function connectWebSocket_global() {
+    const wsHost = MISSKEY_URL.replace('https://', '');
+    const wsUrl = `wss://${wsHost}/streaming?i=${MISSKEY_TOKEN}`;
+    
+    const ws = new WebSocket(wsUrl);
+
+    ws.on('open', async () => {
+        retryCount_global = 0; // 接続成功時にリセット
+        await writeLog('info', 'connectWebSocket_global', 'WebSocket_global接続が確立されました', null, null);
+        
+        const connectMessage = {
+            type: 'connect',
+            body: {
+                channel: 'globalTimeline',
+                id: 'global-Timeline',
+                params: {}
+            }
+        };
+        
+        ws.send(JSON.stringify(connectMessage));
+    });
+
+    ws.on('message', (data) => {
+        try {
+            const message = JSON.parse(data);
+            
+            // メッセージタイプに基づいて処理を分岐
+            if (message.type === 'channel' && message.body.type === 'note') {
+                const note = message.body.body;
+                handleNote(note);
+            }
+
+        } catch (error) {
+            writeLog('error', 'connectWebSocket_global', `メッセージのパース中にエラーが発生: ${error}`, null, null);
+        }
+    });
+
+    // ノート処理関数を修正
+    function handleNote(note) {
+        processGtlNote(note);        
+
+    }
+
+    ws.on('error', async (error) => {
+        await writeLog('error', 'connectWebSocket_global', `WebSocketエラー: ${error}`, null, null);
+    });
+
+    ws.on('close', async () => {
+        const retryDelay = retryCount_global >= 12 ? 3600000 : 5000; // 12回以上は1時間待機
+        await writeLog('info', 'connectWebSocket_global', 
+            `WebSocket接続が閉じられました。${retryDelay/1000}秒後に再接続を試みます。(試行回数: ${retryCount_global + 1})`, 
+            null, null);
+        
+        setTimeout(() => {
+            console.log('WebSocket再接続を試みます...');
+            retryCount_global++;
+            connectWebSocket_global(); // ここをglobalに修正
+        }, retryDelay);
     });
 
     return ws;
@@ -75,8 +151,9 @@ function connectWebSocket_main() {
     
     const ws = new WebSocket(wsUrl);
 
-    ws.on('open', () => {
-        console.log('WebSocket_main接続が確立されました');
+    ws.on('open', async () => {
+        retryCount_main = 0; // 接続成功時にリセット
+        await writeLog('info', 'connectWebSocket_main', 'WebSocket_main接続が確立されました', null, null);
         
         const connectMessage = {
             type: 'connect',
@@ -95,14 +172,14 @@ function connectWebSocket_main() {
            
             if (message.type === 'channel') {
                 if (message.body.type === 'followed') {
-                    console.log('フォローイベント:', message.body);
+                    writeLog('info', 'connectWebSocket_main', `フォローイベント受信: ${JSON.stringify(message.body)}`, null, null);
                     const notice = message.body.body;
                     handleFollow(notice);
                 }
             }
 
         } catch (error) {
-            console.error('メッセージのパース中にエラーが発生:', error);
+            writeLog('error', 'connectWebSocket_main', `メッセージのパース中にエラーが発生: ${error}`, null, null);
         }
     });
 
@@ -112,19 +189,24 @@ function connectWebSocket_main() {
 
     }
 
-    ws.on('error', (error) => {
-        console.error('WebSocket_mainエラー:', error);
+    ws.on('error', async (error) => {
+        await writeLog('error', 'connectWebSocket_main', `WebSocket_mainエラー: ${error}`, null, null);
     });
 
-    ws.on('close', () => {
-        console.log('WebSocket_main接続が閉じられました');
+    ws.on('close', async () => {
+        const retryDelay = retryCount_main >= 12 ? 3600000 : 5000; // 12回以上は1時間待機
+        await writeLog('info', 'connectWebSocket_main', 
+            `WebSocket_main接続が閉じられました。${retryDelay/1000}秒後に再接続を試みます。(試行回数: ${retryCount_main + 1})`, 
+            null, null);
+        
         setTimeout(() => {
             console.log('WebSocket_main再接続を試みます...');
+            retryCount_main++;
             connectWebSocket_main();
-        }, 5000);
+        }, retryDelay);
     });
 
     return ws;
 }
 
-export { connectWebSocket_hybrid,connectWebSocket_main };
+export { connectWebSocket_hybrid,connectWebSocket_main, connectWebSocket_global };

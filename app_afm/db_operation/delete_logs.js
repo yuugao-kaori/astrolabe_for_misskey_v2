@@ -23,15 +23,21 @@ async function deleteOldLogs() {
         await client.connect();
         connected = true;
 
-        // 一週間前以前のログを削除
-        const query = `
+        // 削除対象のレコード数を先に取得
+        const countQuery = `
+            SELECT COUNT(*) 
+            FROM logs 
+            WHERE created_at < NOW() - INTERVAL '7 days'
+        `;
+        const countResult = await client.query(countQuery);
+        const deletedCount = parseInt(countResult.rows[0].count);
+
+        // 古いログを削除
+        const deleteQuery = `
             DELETE FROM logs 
             WHERE created_at < NOW() - INTERVAL '7 days'
-            RETURNING COUNT(*)
         `;
-
-        const result = await client.query(query);
-        const deletedCount = result.rows[0].count;
+        await client.query(deleteQuery);
         
         await writeLog('info', 'deleteOldLogs', `${deletedCount}件の古いログを削除しました`, null, null);
         return true;
