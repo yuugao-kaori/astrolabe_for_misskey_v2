@@ -9,8 +9,7 @@ chmod -R 777 penetration
 
 
 git add . && git commit -m "
-- READMEがそれなりに
-- LICENSEを有効なものに
-- 中国語がマルコフ連鎖によって生成されてしまう問題を修正
+- フォロー取得時にnullが返却されても処理が続行されてしまい、全フォロワーをアンフォローする問題を修正
+- 絵文字を取得した時にnullが返却されてもDBに書き込まずエラー処理する
 " && git push -u origin development
 
