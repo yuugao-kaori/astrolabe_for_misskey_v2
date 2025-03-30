@@ -18,6 +18,8 @@ class TextProcessor:
         self.forbidden_words = self._get_forbidden_words()
         # ストップワードのリストを追加
         self.stop_words = self._get_stop_words()
+        # 中国語特有の文字リストを追加
+        self.chinese_chars = ['读', '难', '书', '说', '谢', '对', '话', '吗', '吧', '们', '这', '你', '她', '很', '给']
         
     def get_texts_from_db(self):
         try:
@@ -127,6 +129,11 @@ class TextProcessor:
         if not text:
             return False
         
+        # 中国語特有の文字が含まれていないかチェック
+        for char in self.chinese_chars:
+            if char in text:
+                return False
+        
         # スペースで分割して各単語をチェック
         words = text.split()
         for word in words:
@@ -144,6 +151,10 @@ class TextProcessor:
             processed_texts = []
             for text in texts:
                 try:
+                    # 中国語特有の文字を含むテキストを除外
+                    if any(char in text for char in self.chinese_chars):
+                        continue
+                        
                     if text and isinstance(text, str) and len(text.strip()) > 10:
                         if not text.strip().endswith('。'):
                             text = text.strip() + '。'

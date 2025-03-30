@@ -29,7 +29,7 @@ const pool = new Pool({
 async function writeLog(level, source, message, userId = null, metadata = null) {
     let retryCount = 0;
     const maxRetries = 3;
-    let client;
+    let client = null;
 
     while (retryCount < maxRetries) {
         try {
@@ -52,7 +52,14 @@ async function writeLog(level, source, message, userId = null, metadata = null) 
             console.log(`ログを作成しました: ID=${result.rows[0].log_id}`);
             return true;
         } catch (error) {
-            await client.query('ROLLBACK');
+            if (client) {
+                try {
+                    await client.query('ROLLBACK');
+                } catch (rollbackError) {
+                    console.error('ROLLBACKの実行中にエラーが発生:', rollbackError.message);
+                }
+            }
+            
             if (error.message === 'Connection terminated' && retryCount < maxRetries - 1) {
                 retryCount++;
                 console.error(`接続が切断されました。リトライ ${retryCount}/${maxRetries}`);

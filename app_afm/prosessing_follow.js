@@ -30,7 +30,18 @@ async function processadjustmentFollow() {
     try {
         // フォロワーとフォロー一覧を取得
         const followers = await getAllFollowers(TARGET_USER_ID);
+        if (!followers) {
+            const error_message = `フォロワー取得に失敗しました`;
+            await writeLog('error', 'processadjustmentFollow', error_message, null, null);
+            return;
+        }
         const followings = await getAllFollowings(TARGET_USER_ID);
+        if (!followings) {
+            const error_message = `フォロー取得に失敗しました`;
+            await writeLog('error', 'processadjustmentFollow', error_message, null, null);
+            return;
+        }
+        // フォロワー数とフォロー数をログに出力
         const follow_count_data = `取得したフォロワー数：${followers.length}\nフォロー数：${followings.length}`
         await writeLog('debug', 'processadjustmentFollow', follow_count_data, null, null);
 

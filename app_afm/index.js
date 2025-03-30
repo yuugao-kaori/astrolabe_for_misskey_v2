@@ -181,13 +181,26 @@ async function emoji_difference() {
         const emoji_list = await getMultiKVoperation('memorandum', 'emoji_list');
 
         const new_emoji_list = await getMisskeyEmojiList();
+        
 
-        // emoji_listがnullの場合の処理
+        // 新規絵文字リストの検証
+        if (!Array.isArray(new_emoji_list) || new_emoji_list.length === 0) {
+            const error_message = '新規絵文字リストの取得に失敗しました';
+            await writeLog('error', 'emoji_difference', error_message, null, null);
+            return;
+        }
+
+        // 初回実行時の処理
         if (!emoji_list) {
             console.log('初回の絵文字リストを保存します');
-            await updateMultiKVoperation('memorandum', new_emoji_list, 'emoji_list');
-            const info_message = '初回の絵文字リストを保存しました';
-            await writeLog('info', 'emoji_difference', info_message, null, null);
+            try {
+                await updateMultiKVoperation('memorandum', new_emoji_list, 'emoji_list');
+                const info_message = '初回の絵文字リストを保存しました';
+                await writeLog('info', 'emoji_difference', info_message, null, null);
+            } catch (error) {
+                const error_message = `初回絵文字リストの保存に失敗: ${error.message}`;
+                await writeLog('error', 'emoji_difference', error_message, null, null);
+            }
             return;
         }
 
