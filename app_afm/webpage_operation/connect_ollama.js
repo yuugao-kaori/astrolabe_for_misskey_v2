@@ -215,8 +215,10 @@ async function air_reply_ollama(input_text, note_id) {
         },
       ],
       stream: false,
+      think: false, // 試行的に実施
       options: {
         num_gpu_layers: 999, // 可能なだけGPUに載せる
+        num_predict: 80, // 生成上限。50字返信なら 60-120 程度で十分
         stop: ["<|endoftext|>", "<|im_end|>", "<|eot_id|>"],
       },
     };
@@ -237,8 +239,9 @@ async function air_reply_ollama(input_text, note_id) {
     const startTime = performance.now();
 
     // Ollamaサーバーに対してPOSTリクエストを送信
-    const response = await axios.post(accessURL, requestBody);
-
+    const response = await axios.post(accessURL, requestBody, {
+      timeout: 3600_000,
+    });
     // API呼び出し終了時間
     const endTime = performance.now();
     const duration = endTime - startTime; // 処理時間（ミリ秒）
@@ -306,8 +309,10 @@ async function summary_ollama(input_text) {
         },
       ],
       stream: false,
+      think: false, // 試行的に実施
       options: {
         num_gpu_layers: 999, // 可能なだけGPUに載せる
+        num_predict: 80, // 生成上限。50字返信なら 60-120 程度で十分
         stop: ["<|endoftext|>", "<|im_end|>", "<|eot_id|>"],
       },
     };
@@ -330,7 +335,9 @@ async function summary_ollama(input_text) {
     while (attempts < maxAttempts) {
       attempts++;
       const startTime = performance.now();
-      const response = await axios.post(accessURL, requestBody);
+      const response = await axios.post(accessURL, requestBody, {
+        timeout: 3600_000,
+      });
       const endTime = performance.now();
       duration = endTime - startTime;
 
@@ -344,7 +351,7 @@ async function summary_ollama(input_text) {
           await writeLog(
             "warn",
             "summary_ollama",
-            `要約にend_of_boxが含まれるため再生成を試みます（${attempts}回目）`,
+            `要約にend_of_boxが含まれるため再生成を試みます（${attempts}回目）\n${message}\n (処理時間: ${duration.toFixed(2) * 1000 * 60}分)`,
             null,
             null,
           );
@@ -356,19 +363,25 @@ async function summary_ollama(input_text) {
           await writeLog(
             "warn",
             "summary_ollama",
-            `要約が100字以上のため再生成を試みます（${attempts}回目）`,
+            `要約が100字以上のため再生成を試みます（${attempts}回目）\n${message}\n (処理時間: ${duration.toFixed(2) * 1000 * 60}分)`,
             null,
             null,
           );
         }
       } else {
-        throw new Error("有効なレスポンスデータが見つかりません");
+        await writeLog(
+          "warn",
+          "summary_ollama",
+          `Ollama接続エラーが発生しました（${attempts}回目）\nレスポンスデータ: ${JSON.stringify(response.data)}\n (処理時間: ${duration.toFixed(2) * 1000 * 60}分)`,
+          null,
+          null,
+        );
         continue;
       }
     }
 
     if (message && message.length < 100) {
-      const info_message = `Ollama要約生成を実行 (処理時間: ${duration.toFixed(2)}ms)`;
+      const info_message = `Ollama要約生成を実行 (処理時間: ${duration.toFixed(2) * 1000 * 60})`;
       await writeLog("info", "summary_ollama", info_message, null, null);
       return message;
     } else {
