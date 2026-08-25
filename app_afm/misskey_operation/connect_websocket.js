@@ -2,544 +2,396 @@ import WebSocket from 'ws';
 import { config } from 'dotenv';
 import { processMentions } from '../processing_mentions.js';
 import { processFollow } from '../prosessing_follow.js';
-import { processGtlNote } from '../misskey_operation/processing_gtl_note.js';
+import { processGtlNote } from './processing_gtl_note.js';
 import { writeLog } from '../db_operation/create_logs.js';
 import { air_reply_ollama } from '../webpage_operation/connect_ollama.js';
-import { createMisskeyReaction } from './create_reaction.js';   
-config();
+import { createMisskeyReaction } from './create_reaction.js';
 
+config();
 
 const MISSKEY_TOKEN = process.env.NOTICE_MISSKEY_TOKEN;
 const MISSKEY_URL = process.env.NOTICE_MISSKEY_URL;
 const MISSKEY_USER_ID = process.env.NOTICE_MISSKEY_BOT_USER_ID;
-const EXCLUSION_MISSKEY_HOST = process.env.EXCLUSION_MISSKEY_HOST || 'misskey.seitendan.com';
 
-// 再試行回数を追跡する変数を追加
-let retryCount_hybrid = 0;
-let retryCount_global = 0;
-let retryCount_main = 0;
+const BASE_RETRY_DELAY_MS = 5000;
+const MAINTENANCE_RETRY_DELAY_MS = 60000;
+const MAX_RETRY_DELAY_MS = 3600000;
+const RETRY_JITTER_RATE = 0.2;
+const PING_INTERVAL_MS = 60000;
+const STABLE_CONNECTION_MS = 60000;
+const TERMINATE_GRACE_MS = 1000;
 
-// 現在のWebSocket接続を保持する変数を追加
-let currentWs_hybrid = null;
-let currentWs_global = null;
-let currentWs_main = null;
-
-// WebSocketのオプション設定
 const WS_OPTIONS = {
-    handshakeTimeout: 30000, // 30秒のハンドシェイクタイムアウト
-    timeout: 30000, // 30秒の接続タイムアウト
+    handshakeTimeout: 30000,
     headers: {
         'User-Agent': 'MisskeyBot/1.0'
     },
     followRedirects: true
 };
 
-// WebSocketを安全に切断するヘルパー関数
-async function safelyCloseWebSocket(ws) {
-    return new Promise((resolve) => {
-        if (!ws || ws.readyState === WebSocket.CLOSED) {
-            console.log("WebSocketは既に閉じられているか無効です");
-            resolve();
+function buildWebSocketUrl() {
+    if (!MISSKEY_URL || !MISSKEY_TOKEN) {
+        throw new Error('NOTICE_MISSKEY_URL または NOTICE_MISSKEY_TOKEN が設定されていません');
+    }
+
+    const wsUrl = new URL('/streaming', MISSKEY_URL);
+    if (wsUrl.protocol === 'https:') {
+        wsUrl.protocol = 'wss:';
+    } else if (wsUrl.protocol === 'http:') {
+        wsUrl.protocol = 'ws:';
+    } else if (wsUrl.protocol !== 'wss:' && wsUrl.protocol !== 'ws:') {
+        throw new Error(`未対応のMisskey URLプロトコルです: ${wsUrl.protocol}`);
+    }
+
+    wsUrl.searchParams.set('i', MISSKEY_TOKEN);
+    return wsUrl.toString();
+}
+
+function logSafely(level, source, message) {
+    void writeLog(level, source, message, null, null).catch((error) => {
+        console.error(`[${source}] ログの保存に失敗しました:`, error);
+    });
+}
+
+function errorMessage(error) {
+    return error instanceof Error ? error.message : String(error);
+}
+
+function handleHybridNote(note) {
+    if (note.mentions?.length > 0) {
+        void processMentions(note);
+    }
+
+    if (note.text?.includes('ラーベちゃん') && Math.floor(Math.random() * 5) === 0) {
+        void createMisskeyReaction(note.id, ':astrolabe_icon:');
+        logSafely(
+            'info',
+            'connectWebSocket_hybrid',
+            `ラーベちゃんの投稿にリアクションを追加: ${note.id}`
+        );
+        return;
+    }
+
+    if (!note.text || note.userId === MISSKEY_USER_ID) {
+        return;
+    }
+
+    let ollamaNoteText = note.text.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim();
+    ollamaNoteText = ollamaNoteText.replace(/https?:\/\/[^\s]+/g, '');
+    ollamaNoteText = ollamaNoteText.replace(/:[a-zA-Z0-9_]+:/g, '');
+
+    const userHost = note.user?.host;
+    if (Math.floor(Math.random() * 20) === 0 && userHost === null && ollamaNoteText.length >= 10) {
+        void air_reply_ollama(ollamaNoteText, note.id);
+        logSafely(
+            'info',
+            'connectWebSocket_hybrid',
+            `エアリプOllama処理を実行_ホストインスタンスの投稿: ${ollamaNoteText}`
+        );
+        return;
+    }
+
+    console.log('エアリプOllama処理はスキップされました', userHost, note.id);
+    logSafely(
+        'info',
+        'connectWebSocket_hybrid',
+        `エアリプOllama処理はスキップされました:${userHost} ${ollamaNoteText}`
+    );
+}
+
+function handleMainMessage(message) {
+    if (message.type !== 'channel' || message.body?.type !== 'followed') {
+        return;
+    }
+
+    logSafely(
+        'info',
+        'connectWebSocket_main',
+        `フォローイベント受信: ${JSON.stringify(message.body)}`
+    );
+    void processFollow(message.body.body);
+}
+
+function calculateRetryDelay(retryCount, error) {
+    const maintenance = errorMessage(error).includes('Unexpected server response: 502');
+    const baseDelay = maintenance ? MAINTENANCE_RETRY_DELAY_MS : BASE_RETRY_DELAY_MS;
+    const exponent = Math.min(Math.max(retryCount - 1, 0), 20);
+    const backoffDelay = Math.min(baseDelay * Math.pow(1.5, exponent), MAX_RETRY_DELAY_MS);
+    const jitter = Math.floor(backoffDelay * RETRY_JITTER_RATE * Math.random());
+    return Math.min(backoffDelay + jitter, MAX_RETRY_DELAY_MS);
+}
+
+function createConnectionManager({ name, subscriptions, onMessage }) {
+    const source = `connectWebSocket_${name}`;
+    let currentWs = null;
+    let retryCount = 0;
+    let retryTimer = null;
+    let retryAt = null;
+    let stableTimer = null;
+    let connecting = false;
+    let connectionPromise = null;
+    let resolveConnection = null;
+
+    function getConnectionPromise() {
+        if (!connectionPromise) {
+            connectionPromise = new Promise((resolve) => {
+                resolveConnection = resolve;
+            });
+        }
+        return connectionPromise;
+    }
+
+    function resolvePendingConnection(ws) {
+        const resolve = resolveConnection;
+        connectionPromise = null;
+        resolveConnection = null;
+        resolve?.(ws);
+    }
+
+    function scheduleReconnect(error, closeDescription = '') {
+        if (retryTimer || connecting || currentWs?.readyState === WebSocket.OPEN) {
             return;
         }
 
-        // タイムアウト処理を追加（5秒後に強制的に解決）
-        const timeout = setTimeout(() => {
-            console.log("WebSocket切断がタイムアウトしました - 強制解決します");
-            resolve();
-        }, 5000);
+        retryCount += 1;
+        const delay = calculateRetryDelay(retryCount, error);
+        retryAt = Date.now() + delay;
+        const delaySeconds = Math.ceil(delay / 1000);
+        const detail = closeDescription ? ` (${closeDescription})` : '';
 
-        const onClose = () => {
-            clearTimeout(timeout);
-            ws.removeEventListener('close', onClose);
-            console.log("WebSocketが正常に閉じられました");
-            resolve();
-        };
+        logSafely(
+            errorMessage(error).includes('Unexpected server response: 502') ? 'info' : 'error',
+            source,
+            `WebSocket接続が閉じられました${detail}。${delaySeconds}秒後に再接続します。(試行回数: ${retryCount})`
+        );
+        console.warn(
+            `${name} WebSocket接続が閉じられました。${delaySeconds}秒後に再接続します。`,
+            error
+        );
 
-        ws.addEventListener('close', onClose);
-
-        if (ws.readyState === WebSocket.OPEN) {
-            ws.close();
-        } else if (ws.readyState === WebSocket.CLOSING) {
-            // すでにクローズ中なので、closeイベントを待つだけ
-            console.log("WebSocketは既にクローズ中です");
-        } else {
-            // 接続中でもクローズ中でもない場合はすぐに解決
-            clearTimeout(timeout);
-            resolve();
-        }
-    });
-}
-
-async function connectWebSocket_hybrid() {
-    const wsHost = MISSKEY_URL.replace('https://', '');
-    const wsUrl = `wss://${wsHost}/streaming?i=${MISSKEY_TOKEN}`;
-
-    try {
-        if (currentWs_hybrid && currentWs_hybrid.readyState !== WebSocket.CLOSED) {
-            console.log("既存のhybrid WebSocket接続を切断します...");
-            await safelyCloseWebSocket(currentWs_hybrid);
-            console.log("既存のhybrid WebSocket接続を切断しました、新たに接続を確立します");
-        }
-
-        return await createHybridWebSocket(wsUrl);
-    } catch (error) {
-        const isMaintenance = error && typeof error.message === 'string' && error.message.includes('Unexpected server response: 502');
-        const baseDelay = isMaintenance ? 60000 : 5000;
-        const retryDelay = retryCount_hybrid >= 12 ? 3600000 : baseDelay * Math.pow(1.5, retryCount_hybrid || 0);
-        retryCount_hybrid++;
-
-        const logMessage = isMaintenance
-            ? `メンテナンス中の可能性があります (HTTP 502)。${Math.round(retryDelay / 1000)}秒後に再試行します。`
-            : `接続試行中に例外が発生: ${error && error.message ? error.message : error}. ${Math.round(retryDelay / 1000)}秒後に再試行します。`;
-
-        await writeLog(isMaintenance ? 'info' : 'error', 'connectWebSocket_hybrid', logMessage, null, null);
-        console.warn(`hybrid WebSocket接続エラー。${Math.round(retryDelay / 1000)}秒後に再試行します。`, error);
-
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
-        return connectWebSocket_hybrid();
+        retryTimer = setTimeout(() => {
+            retryTimer = null;
+            retryAt = null;
+            attemptConnection();
+        }, delay);
     }
-}
 
-// 実際の接続を作成する関数を分離
-function createHybridWebSocket(wsUrl) {
-    return new Promise((resolve, reject) => {
+    function handleAttemptFailure(error) {
+        connecting = false;
+        currentWs = null;
+        logSafely('error', source, `WebSocket接続の開始に失敗しました: ${errorMessage(error)}`);
+        scheduleReconnect(error);
+    }
+
+    function attemptConnection() {
+        if (
+            connecting ||
+            retryTimer ||
+            currentWs?.readyState === WebSocket.OPEN ||
+            currentWs?.readyState === WebSocket.CONNECTING
+        ) {
+            return;
+        }
+
+        connecting = true;
+        let ws;
         try {
-            const ws = new WebSocket(wsUrl, WS_OPTIONS);
-            currentWs_hybrid = ws; // 新しい接続を保存
+            ws = new WebSocket(buildWebSocketUrl(), WS_OPTIONS);
+        } catch (error) {
+            handleAttemptFailure(error);
+            return;
+        }
 
-            // ピンポンでの接続維持
-            let pingInterval;
-            
-            ws.on('open', async () => {
-                retryCount_hybrid = 0; // 接続成功時にリセット
-                await writeLog('info', 'connectWebSocket_hybrid', 'WebSocket接続が確立されました', null, null);
-                
-                const connectMessage = {
-                    type: 'connect',
-                    body: {
-                        channel: 'hybridTimeline',
-                        id: 'hybrid-timeline',
-                        params: {}
-                    }
-                };
-                
-                ws.send(JSON.stringify(connectMessage));
-                
-                // 60秒ごとにpingを送信して接続を維持
-                pingInterval = setInterval(() => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.ping();
-                    }
-                }, 60000);
-                
-                resolve(ws);
-            });
+        currentWs = ws;
+        let ended = false;
+        let lastError = null;
+        let pingInterval = null;
+        let terminateTimer = null;
+        let pongReceived = true;
 
-            ws.on('message', (data) => {
-                try {
-                    const message = JSON.parse(data);
-                    
-                    // メッセージタイプに基づいて処理を分岐
-                    if (message.type === 'channel' && message.body.type === 'note') {
-                        const note = message.body.body;
-                        console.log(`受信したノート: ${note}`);
-                        handleNote(note);
-                    }
+        function finishSocket(code, reason) {
+            if (ended) {
+                return;
+            }
+            ended = true;
+            clearInterval(pingInterval);
+            clearTimeout(terminateTimer);
 
-                } catch (error) {
-                    writeLog('error', 'connectWebSocket_hybrid', `メッセージのパース中にエラーが発生: ${error}`, null, null);
-                }
-            });
-
-            // ノート処理関数を修正
-            function handleNote(note) {
-                // メンションを含むノートの場合、処理を実行
-                if (note.mentions && note.mentions.length > 0) {
-                    processMentions(note);
-                }
-                
-                if (note.text && note.text.includes('ラーベちゃん') && Math.floor(Math.random() * 5) === 0) {
-                    createMisskeyReaction(note.id, ':astrolabe_icon:'); // ラーベちゃんの投稿にリアクションを追加
-                    writeLog('info', 'connectWebSocket_hybrid', `ラーベちゃんの投稿にリアクションを追加: ${note.id}`, null, null);
-                    return; // ラーベちゃんの投稿はここで処理を終了
-                }
-
-                // エアリプOllama処理を実行
-                if (note.text && note.userId !== MISSKEY_USER_ID ) {
-                    // HTMLタグを除去し、空白をトリム
-                    let Ollama_note_text = note.text.replace(/<[^>]*>/g, '').replace(/&nbsp;/g, ' ').trim(); 
-                    // URLを除去
-                    Ollama_note_text = Ollama_note_text.replace(/https?:\/\/[^\s]+/g, '');
-                    // :emoji: のようなカスタム絵文字を除去
-                    Ollama_note_text = Ollama_note_text.replace(/:[a-zA-Z0-9_]+:/g, '');
-                    if (Math.floor(Math.random() * 20) === 0 && note.user.host === null && Ollama_note_text.length >= 10) {
-                        air_reply_ollama(Ollama_note_text,note.id);
-                        writeLog('info', 'connectWebSocket_hybrid',
-                            `エアリプOllama処理を実行_ホストインスタンスの投稿: ${Ollama_note_text}`, null, null)
-                        return; // エアリプOllama処理を実行
-                    } // else if (Math.floor(Math.random() * 50) === 0 && Ollama_note_text.length >= 40) {
-                    //    air_reply_ollama(Ollama_note_text,note.id);
-                    //    writeLog('info', 'connectWebSocket_hybrid',
-                    //        `エアリプOllama処理を実行_一般インスタンスの投稿: ${Ollama_note_text}`, null, null);
-                    //    return; // エアリプOllama処理を実行
-                    //}
-                     else {
-                        console.log('エアリプOllama処理はスキップされました',note.user.host, note);
-                        writeLog('info', 'connectWebSocket_hybrid',
-                            `エアリプOllama処理はスキップされました:${note.user.host} ${Ollama_note_text}`, null, null);
-                        return; // エアリプOllama処理をスキップ
-                    }
-                }
+            if (currentWs !== ws) {
+                return;
             }
 
-            ws.on('error', async (error) => {
-                clearInterval(pingInterval);
-                await writeLog('error', 'connectWebSocket_hybrid', `WebSocketエラー: ${error.message || error}`, null, null);
-                
-                // エラー後に自動再接続させるため、closeイベントが発火しない場合は明示的にクローズ
-                if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
-                    safelyCloseWebSocket(ws).then(() => {
-                        console.log("エラー後にWebSocket_hybrid接続を切断しました");
-                        reject(error);
-                    });
-                } else {
-                    reject(error);
-                }
-            });
+            clearTimeout(stableTimer);
+            stableTimer = null;
+            currentWs = null;
+            connecting = false;
 
-            ws.on('close', async () => {
-                clearInterval(pingInterval);
-                // 現在のインスタンスが自分自身であることを確認
-                if (currentWs_hybrid === ws) {
-                    currentWs_hybrid = null;
-                }
-                
-                // 指数バックオフを実装 (最大1時間)
-                const baseDelay = 5000;
-                const maxDelay = 3600000; // 1時間
-                const delay = Math.min(baseDelay * Math.pow(1.5, retryCount_hybrid), maxDelay);
-                
-                await writeLog('info', 'connectWebSocket_hybrid', 
-                    `WebSocket接続が閉じられました。${delay/1000}秒後に再接続を試みます。(試行回数: ${retryCount_hybrid + 1})`, 
-                    null, null);
-                
-                setTimeout(() => {
-                    console.log('WebSocket_hybridの再接続を試みます...');
-                    retryCount_hybrid++;
-                    connectWebSocket_hybrid();
-                }, delay);
-            });
-
-            // pingに対するpongイベント
-            ws.on('pong', () => {
-                console.log('Pong received from server (hybrid)');
-            });
-
-        } catch (error) {
-            reject(error);
-        }
-    });
-}
-
-async function connectWebSocket_global() {
-    const wsHost = MISSKEY_URL.replace('https://', '');
-    const wsUrl = `wss://${wsHost}/streaming?i=${MISSKEY_TOKEN}`;
-
-    try {
-        if (currentWs_global && currentWs_global.readyState !== WebSocket.CLOSED) {
-            console.log("既存のglobal WebSocket接続を切断します...");
-            await safelyCloseWebSocket(currentWs_global);
-            console.log("既存のglobal WebSocket接続を切断しました、新たに接続を確立します");
+            const reasonText = Buffer.isBuffer(reason) ? reason.toString() : String(reason || '');
+            const closeDescription = code ? `code=${code}${reasonText ? `, reason=${reasonText}` : ''}` : '';
+            scheduleReconnect(lastError || new Error(closeDescription || 'WebSocket connection closed'), closeDescription);
         }
 
-        return await createGlobalWebSocket(wsUrl);
-    } catch (error) {
-        const isMaintenance = error && typeof error.message === 'string' && error.message.includes('Unexpected server response: 502');
-        const baseDelay = isMaintenance ? 60000 : 5000;
-        const retryDelay = retryCount_global >= 12 ? 3600000 : baseDelay * Math.pow(1.5, retryCount_global || 0);
-        retryCount_global++;
-
-        const logMessage = isMaintenance
-            ? `メンテナンス中の可能性があります (HTTP 502)。${Math.round(retryDelay / 1000)}秒後に再試行します。`
-            : `接続試行中に例外が発生: ${error && error.message ? error.message : error}. ${Math.round(retryDelay / 1000)}秒後に再試行します。`;
-
-        await writeLog(isMaintenance ? 'info' : 'error', 'connectWebSocket_global', logMessage, null, null);
-        console.warn(`global WebSocket接続エラー。${Math.round(retryDelay / 1000)}秒後に再試行します。`, error);
-
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
-        return connectWebSocket_global();
-    }
-}
-
-// 実際の接続を作成する関数を分離
-function createGlobalWebSocket(wsUrl) {
-    return new Promise((resolve, reject) => {
-        try {
-            const ws = new WebSocket(wsUrl, WS_OPTIONS);
-            currentWs_global = ws; // 新しい接続を保存
-
-            // ピンポンでの接続維持
-            let pingInterval;
-
-            ws.on('open', async () => {
-                retryCount_global = 0; // 接続成功時にリセット
-                await writeLog('info', 'connectWebSocket_global', 'WebSocket_global接続が確立されました', null, null);
-                
-                const connectMessage = {
-                    type: 'connect',
-                    body: {
-                        channel: 'globalTimeline',
-                        id: 'global-Timeline',
-                        params: {}
-                    }
-                };
-                
-                ws.send(JSON.stringify(connectMessage));
-                
-                // 60秒ごとにpingを送信して接続を維持
-                pingInterval = setInterval(() => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.ping();
-                    }
-                }, 60000);
-                
-                resolve(ws);
-            });
-
-            ws.on('message', (data) => {
-                try {
-                    const message = JSON.parse(data);
-                    
-                    // メッセージタイプに基づいて処理を分岐
-                    if (message.type === 'channel' && message.body.type === 'note') {
-                        const note = message.body.body;
-                        handleNote(note);
-                    }
-
-                } catch (error) {
-                    writeLog('error', 'connectWebSocket_global', `メッセージのパース中にエラーが発生: ${error}`, null, null);
-                }
-            });
-
-            // ノート処理関数
-            function handleNote(note) {
-                processGtlNote(note);        
+        ws.once('open', () => {
+            if (currentWs !== ws || ended) {
+                ws.terminate();
+                return;
             }
 
-            ws.on('error', async (error) => {
-                clearInterval(pingInterval);
-                await writeLog('error', 'connectWebSocket_global', `WebSocketエラー: ${error.message || error}`, null, null);
-                
-                // エラー後に自動再接続させるため、closeイベントが発火しない場合は明示的にクローズ
-                if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
-                    safelyCloseWebSocket(ws).then(() => {
-                        console.log("エラー後にWebSocket_global接続を切断しました");
-                        reject(error);
-                    });
-                } else {
-                    reject(error);
-                }
-            });
-
-            ws.on('close', async () => {
-                clearInterval(pingInterval);
-                // 現在のインスタンスが自分自身であることを確認
-                if (currentWs_global === ws) {
-                    currentWs_global = null;
-                }
-                
-                // 指数バックオフを実装 (最大1時間)
-                const baseDelay = 5000;
-                const maxDelay = 3600000; // 1時間
-                const delay = Math.min(baseDelay * Math.pow(1.5, retryCount_global), maxDelay);
-                
-                await writeLog('info', 'connectWebSocket_global', 
-                    `WebSocket接続が閉じられました。${delay/1000}秒後に再接続を試みます。(試行回数: ${retryCount_global + 1})`, 
-                    null, null);
-                
-                setTimeout(() => {
-                    console.log('WebSocket_globalの再接続を試みます...');
-                    retryCount_global++;
-                    connectWebSocket_global();
-                }, delay);
-            });
-
-            // pingに対するpongイベント
-            ws.on('pong', () => {
-                console.log('Pong received from server (global)');
-            });
-
-        } catch (error) {
-            reject(error);
-        }
-    });
-}
-
-async function connectWebSocket_main() {
-    const wsHost = MISSKEY_URL.replace('https://', '');
-    const wsUrl = `wss://${wsHost}/streaming?i=${MISSKEY_TOKEN}`;
-
-    try {
-        if (currentWs_main && currentWs_main.readyState !== WebSocket.CLOSED) {
-            console.log("既存のmain WebSocket接続を切断します...");
-            await safelyCloseWebSocket(currentWs_main);
-            console.log("既存のmain WebSocket接続を切断しました、新たに接続を確立します");
-        }
-
-        return await createMainWebSocket(wsUrl);
-    } catch (error) {
-        const isMaintenance = error && typeof error.message === 'string' && error.message.includes('Unexpected server response: 502');
-        const baseDelay = isMaintenance ? 60000 : 5000;
-        const retryDelay = retryCount_main >= 12 ? 3600000 : baseDelay * Math.pow(1.5, retryCount_main || 0);
-        retryCount_main++;
-
-        const logMessage = isMaintenance
-            ? `メンテナンス中の可能性があります (HTTP 502)。${Math.round(retryDelay / 1000)}秒後に再試行します。`
-            : `接続試行中に例外が発生: ${error && error.message ? error.message : error}. ${Math.round(retryDelay / 1000)}秒後に再試行します。`;
-
-        await writeLog(isMaintenance ? 'info' : 'error', 'connectWebSocket_main', logMessage, null, null);
-        console.warn(`main WebSocket接続エラー。${Math.round(retryDelay / 1000)}秒後に再試行します。`, error);
-
-        await new Promise(resolve => setTimeout(resolve, retryDelay));
-        return connectWebSocket_main();
-    }
-}
-
-// 実際の接続を作成する関数を分離
-function createMainWebSocket(wsUrl) {
-    return new Promise((resolve, reject) => {
-        try {
-            const ws = new WebSocket(wsUrl, WS_OPTIONS);
-            currentWs_main = ws; // 新しい接続を保存
-
-            // ピンポンでの接続維持
-            let pingInterval;
-
-            ws.on('open', async () => {
-                retryCount_main = 0; // 接続成功時にリセット
-                await writeLog('info', 'connectWebSocket_main', 'WebSocket_main接続が確立されました', null, null);
-                
-                const connectMessage = {
-                    type: 'connect',
-                    body: {
-                        channel: 'main',
-                        id: 'main',
-                        params: {}
-                    }
-                };
-                
-                ws.send(JSON.stringify(connectMessage));
-                
-                // 60秒ごとにpingを送信して接続を維持
-                pingInterval = setInterval(() => {
-                    if (ws.readyState === WebSocket.OPEN) {
-                        ws.ping();
-                    }
-                }, 60000);
-                
-                resolve(ws);
-            });
-
-            ws.on('message', (data) => {
-                try {
-                    const message = JSON.parse(data);
-                   
-                    if (message.type === 'channel') {
-                        if (message.body.type === 'followed') {
-                            writeLog('info', 'connectWebSocket_main', `フォローイベント受信: ${JSON.stringify(message.body)}`, null, null);
-                            const notice = message.body.body;
-                            handleFollow(notice);
+            connecting = false;
+            try {
+                for (const subscription of subscriptions) {
+                    ws.send(JSON.stringify({
+                        type: 'connect',
+                        body: {
+                            channel: subscription.channel,
+                            id: subscription.id,
+                            params: subscription.params || {}
                         }
-                    }
-
-                } catch (error) {
-                    writeLog('error', 'connectWebSocket_main', `メッセージのパース中にエラーが発生: ${error}`, null, null);
+                    }));
                 }
-            });
-
-            // follow処理関数
-            function handleFollow(notice) {
-                processFollow(notice);
+            } catch (error) {
+                lastError = error;
+                logSafely('error', source, `チャンネル購読に失敗しました: ${errorMessage(error)}`);
+                ws.terminate();
+                return;
             }
 
-            ws.on('error', async (error) => {
-                clearInterval(pingInterval);
-                await writeLog('error', 'connectWebSocket_main', `WebSocket_mainエラー: ${error.message || error}`, null, null);
-                
-                // エラー後に自動再接続させるため、closeイベントが発火しない場合は明示的にクローズ
-                if (ws.readyState !== WebSocket.CLOSED && ws.readyState !== WebSocket.CLOSING) {
-                    safelyCloseWebSocket(ws).then(() => {
-                        console.log("エラー後にWebSocket_main接続を切断しました");
-                        reject(error);
-                    });
-                } else {
-                    reject(error);
+            pingInterval = setInterval(() => {
+                if (ws.readyState !== WebSocket.OPEN) {
+                    return;
                 }
-            });
-
-            ws.on('close', async () => {
-                clearInterval(pingInterval);
-                // 現在のインスタンスが自分自身であることを確認
-                if (currentWs_main === ws) {
-                    currentWs_main = null;
+                if (!pongReceived) {
+                    lastError = new Error('pingに対するpongが受信できませんでした');
+                    logSafely('error', source, `WebSocketエラー: ${lastError.message}`);
+                    ws.terminate();
+                    return;
                 }
-                
-                // 指数バックオフを実装 (最大1時間)
-                const baseDelay = 5000;
-                const maxDelay = 3600000; // 1時間
-                const delay = Math.min(baseDelay * Math.pow(1.5, retryCount_main), maxDelay);
-                
-                await writeLog('info', 'connectWebSocket_main', 
-                    `WebSocket接続が閉じられました。${delay/1000}秒後に再接続を試みます。(試行回数: ${retryCount_main + 1})`, 
-                    null, null);
-                
-                setTimeout(() => {
-                    console.log('WebSocket_mainの再接続を試みます...');
-                    retryCount_main++;
-                    connectWebSocket_main();
-                }, delay);
-            });
+                pongReceived = false;
+                ws.ping();
+            }, PING_INTERVAL_MS);
 
-            // pingに対するpongイベント
-            ws.on('pong', () => {
-                console.log('Pong received from server (main)');
-            });
-            
-        } catch (error) {
-            reject(error);
+            clearTimeout(stableTimer);
+            stableTimer = setTimeout(() => {
+                if (currentWs === ws && ws.readyState === WebSocket.OPEN) {
+                    retryCount = 0;
+                }
+            }, STABLE_CONNECTION_MS);
+
+            logSafely('info', source, `WebSocket_${name}接続が確立されました`);
+            resolvePendingConnection(ws);
+        });
+
+        ws.on('message', (data) => {
+            if (currentWs !== ws || ended) {
+                return;
+            }
+            try {
+                const message = JSON.parse(data.toString());
+                onMessage(message);
+            } catch (error) {
+                logSafely('error', source, `メッセージ処理中にエラーが発生: ${errorMessage(error)}`);
+            }
+        });
+
+        ws.on('pong', () => {
+            pongReceived = true;
+        });
+
+        ws.once('error', (error) => {
+            lastError = error;
+            logSafely('error', source, `WebSocketエラー: ${errorMessage(error)}`);
+
+            if (ws.readyState === WebSocket.CLOSED) {
+                finishSocket();
+                return;
+            }
+
+            try {
+                ws.terminate();
+                terminateTimer = setTimeout(() => finishSocket(), TERMINATE_GRACE_MS);
+            } catch (terminateError) {
+                lastError = terminateError;
+                finishSocket();
+            }
+        });
+
+        ws.once('close', (code, reason) => {
+            finishSocket(code, reason);
+        });
+    }
+
+    function connect() {
+        if (currentWs?.readyState === WebSocket.OPEN) {
+            return Promise.resolve(currentWs);
         }
-    });
+
+        const pendingConnection = getConnectionPromise();
+        if (!connecting && !retryTimer) {
+            attemptConnection();
+        }
+        return pendingConnection;
+    }
+
+    function getStatus() {
+        let state = 'NULL';
+        if (currentWs) {
+            state = ['CONNECTING', 'OPEN', 'CLOSING', 'CLOSED'][currentWs.readyState] || 'UNKNOWN';
+        } else if (retryTimer) {
+            state = 'RETRY_WAIT';
+        }
+
+        return {
+            connected: currentWs?.readyState === WebSocket.OPEN,
+            state,
+            retryCount,
+            retryAt: retryAt ? new Date(retryAt).toISOString() : null
+        };
+    }
+
+    return { connect, getStatus };
 }
 
-// WebSocketの状態を確認する関数
-function checkWebSocketStatus() {
-    const states = {
-        0: 'CONNECTING',
-        1: 'OPEN',
-        2: 'CLOSING',
-        3: 'CLOSED'
-    };
-    
-    const status = {
-        hybrid: {
-            connected: currentWs_hybrid !== null && currentWs_hybrid.readyState === WebSocket.OPEN,
-            state: currentWs_hybrid ? states[currentWs_hybrid.readyState] : 'NULL',
-            retryCount: retryCount_hybrid
-        },
-        global: {
-            connected: currentWs_global !== null && currentWs_global.readyState === WebSocket.OPEN,
-            state: currentWs_global ? states[currentWs_global.readyState] : 'NULL',
-            retryCount: retryCount_global
-        },
-        main: {
-            connected: currentWs_main !== null && currentWs_main.readyState === WebSocket.OPEN,
-            state: currentWs_main ? states[currentWs_main.readyState] : 'NULL',
-            retryCount: retryCount_main
+const streamConnection = createConnectionManager({
+    name: 'stream',
+    subscriptions: [
+        { channel: 'hybridTimeline', id: 'hybrid-timeline' },
+        { channel: 'globalTimeline', id: 'global-Timeline' },
+        { channel: 'main', id: 'main' }
+    ],
+    onMessage(message) {
+        if (message.type !== 'channel') {
+            return;
         }
+
+        if (message.body?.id === 'hybrid-timeline' && message.body.type === 'note') {
+            handleHybridNote(message.body.body);
+        } else if (message.body?.id === 'global-Timeline' && message.body.type === 'note') {
+            void processGtlNote(message.body.body);
+        } else if (message.body?.id === 'main') {
+            handleMainMessage(message);
+        }
+    }
+});
+
+function connectWebSocket_hybrid() {
+    return streamConnection.connect();
+}
+
+function connectWebSocket_global() {
+    return streamConnection.connect();
+}
+
+function connectWebSocket_main() {
+    return streamConnection.connect();
+}
+
+function checkWebSocketStatus() {
+    const streamStatus = streamConnection.getStatus();
+    return {
+        hybrid: { ...streamStatus },
+        global: { ...streamStatus },
+        main: { ...streamStatus }
     };
-    
-    return status;
 }
 
 export { connectWebSocket_hybrid, connectWebSocket_main, connectWebSocket_global, checkWebSocketStatus };

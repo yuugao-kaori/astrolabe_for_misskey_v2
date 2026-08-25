@@ -972,18 +972,20 @@ async function checkWebSocketConnections() {
 
     // 問題がある場合は再接続を試みる
     if (!allConnected) {
+      const reconnections = [];
       if (!status.hybrid.connected) {
         console.log("hybrid WebSocket接続を再確立します...");
-        await connectWebSocket_hybrid();
+        reconnections.push(connectWebSocket_hybrid());
       }
       if (!status.global.connected) {
         console.log("global WebSocket接続を再確立します...");
-        await connectWebSocket_global();
+        reconnections.push(connectWebSocket_global());
       }
       if (!status.main.connected) {
         console.log("main WebSocket接続を再確立します...");
-        await connectWebSocket_main();
+        reconnections.push(connectWebSocket_main());
       }
+      await Promise.all(reconnections);
 
       await writeLog(
         "info",
@@ -1180,9 +1182,11 @@ server.listen(port, () => {
 async function main() {
   try {
     // WebSocket接続
-    await connectWebSocket_hybrid();
-    await connectWebSocket_main();
-    await connectWebSocket_global();
+    await Promise.all([
+      connectWebSocket_hybrid(),
+      connectWebSocket_main(),
+      connectWebSocket_global(),
+    ]);
     // 投稿関連のスケジュール
 
     schedule.scheduleJob(
